@@ -1,0 +1,36 @@
+# 虚拟环境（必须忽略，体积巨大）
+.venv/
+venv/
+env/
+uv.lock
+
+# Python 编译缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 密钥环境文件（核心，防止API Key泄露）
+.env
+.env.local
+
+# Jupyter 笔记缓存
+.ipynb_checkpoints/
+*.ipynb
+
+# 日志、临时文件
+*.log
+*.tmp
+*.cache
+
+# 系统/IDE文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 打包、测试缓存
+dist/
+build/
+*.egg-info/
+.pytest_cache/
