@@ -1,7 +1,7 @@
-# app/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1.chat import router as chat_router
+# 关键修改：app → src
+from src.api.v1.chat import router as chat_router
 
 app = FastAPI(title="私人厨师Agent服务")
 
@@ -19,4 +19,5 @@ app.include_router(chat_router, prefix="/api/v1")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    # 此处同步修改为 src.main:app
+    uvicorn.run("src.main:app", host="0.0.0.0", port=8000, reload=True)

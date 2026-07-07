@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse  # 流式响应核心类
-from app.models.schemas import ChatRequest
-from app.agents.chief_agent import search_recipes,get_history,clear_history
+from src.models.schemas import ChatRequest
+from src.agents.chief_agent import search_recipes,get_history,clear_history
 router = APIRouter()
 
 

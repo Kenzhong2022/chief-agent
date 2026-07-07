@@ -1,5 +1,3 @@
 from mangum import Mangum
-from app.main import app
-
-# 将 FastAPI 应用包装为 Vercel 兼容的 Serverless 函数
+from src.main import app  # 路径统一，本地+云端都能识别
 handler = Mangum(app)
