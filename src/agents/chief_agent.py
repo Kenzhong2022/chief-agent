@@ -3,28 +3,28 @@ from dotenv import load_dotenv
 import os
 from langchain_tavily import TavilySearch
 from langgraph.checkpoint.postgres import PostgresSaver
-from psycopg_pool import ConnectionPool, PoolTimeout
-from psycopg import OperationalError
+from psycopg_pool import ConnectionPool
 from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, AIMessageChunk
+from langchain.messages import HumanMessage,SystemMessage,AIMessage,AIMessageChunk
 from langchain_core.runnables import RunnableConfig
-from typing import AsyncGenerator, Optional
 
-load_dotenv()
-
-# 全局变量：连接池、checkpointer、连接串
-CONN_STRING = os.getenv("CONN_STR")
-pool: Optional[ConnectionPool] = None
-checkpointer: Optional[PostgresSaver] = None
-
-# 1. 大模型&工具全局单例（无数据库依赖，可常驻）
+load_dotenv() # import environment key value
+from langchain.tools import tool
+# 1.create model
 model = init_chat_model(
     model="qwen3.5-plus",
     model_provider="openai",
     base_url=os.getenv("DASHSCOPE_BASE_URL"),
     api_key=os.getenv("DASHSCOPE_API_KEY")
 )
-web_search = TavilySearch(max_results=5, topic="general")
+# 2.def tool
+# search_tool
+web_search = TavilySearch(
+    max_results=5,
+    topic="general",
+)
+# 3.create agent
+# 3.1 system prompt
 system_prompt = """
 你是一名私人厨师。收到用户提供的食材照片或清单后，请按以下流程操作：
 1.识别和评估食材：若用户提供照片，首先辨识所有可见食材。基于食材的外观状态，评估其新鲜度与可用量，整理出一份“当前可用食材清单”。
@@ -34,116 +34,83 @@ system_prompt = """
 
 请严格按照流程，优先调用 web_search 工具搜索食谱，搜索不到的情况下才能自己发挥。
 """
-
-# ===================== 核心：全局连接池管理函数 =====================
-def init_pool() -> None:
-    """创建/重建连接池，配置防断开参数"""
-    global pool, checkpointer
-    if not CONN_STRING:
-        raise RuntimeError("未配置 CONN_STR 环境变量")
-
-    # 适配Serverless的池参数，关键配置
-    new_pool = ConnectionPool(
-        conninfo=CONN_STRING,
-        min_size=1,        # 最小常驻1条连接
-        max_size=2,         # 限制最大连接数，避免Vercel多实例爆连接
-        max_wait=2000,      # 获取连接超时2秒
-        max_idle=180,       # 闲置180秒自动回收，防止PG断开标记为BAD
-        max_lifetime=600,   # 连接最长存活10分钟，强制轮换
-    )
-    # 预校验连接可用
-    try:
-        with new_pool.connection() as conn:
-            conn.execute("SELECT 1;")
-    except (OperationalError, PoolTimeout):
-        new_pool.close()
-        raise RuntimeError("数据库连接初始化失败")
-
-    # 销毁旧池（如果存在失效旧池）
-    if pool is not None:
-        try:
-            pool.close()
-        except Exception:
-            pass
-    # 替换全局池
-    pool = new_pool
+# 3.2 setup checkpointer
+conn_string = os.getenv("CONN_STR")
+if conn_string:
+    pool = ConnectionPool(conninfo=conn_string)
     checkpointer = PostgresSaver(pool)
-    checkpointer.setup()
+    checkpointer.setup()  # 自动创建 checkpoint 表，首次运行执行一次即可
+else:
+    print("警告：未配置数据库连接串，会话记忆不会持久化")
 
-def get_healthy_checkpointer() -> PostgresSaver:
-    """获取可用checkpointer，连接失效自动重建连接池"""
-    global pool, checkpointer
-    # 池未初始化，先创建
-    if pool is None or checkpointer is None:
-        init_pool()
+agent = create_agent(
+    model=model,
+    tools=[web_search],
+    system_prompt=system_prompt,
+    checkpointer=checkpointer
+)
 
-    # 校验现有池连接是否失效
+async def search_recipes(prompt: str, image: str, thread_id: str):
+    """流式输出食谱推荐结果，逐块返回文本片段。
+
+    Args:
+        prompt: 用户输入的文本指令
+        image: 食材图片URL，无图片传 None
+        thread_id: 会话线程ID
+
+    Yields:
+        逐段生成的食谱文本片段
+    """
     try:
-        with pool.connection() as conn:
-            conn.execute("SELECT 1;")
-        return checkpointer
-    except (OperationalError, PoolTimeout):
-        # 连接损坏，重建全新连接池
-        init_pool()
-        return checkpointer
-
-# ===================== 业务接口（使用get_healthy_checkpointer自动修复坏连接） =====================
-async def search_recipes(prompt: str, image: str, thread_id: str) -> AsyncGenerator[str, None]:
-    try:
-        # 自动拿到健康可用的checkpointer，坏连接会自动重建池
-        cp = get_healthy_checkpointer()
-        agent = create_agent(
-            model=model,
-            tools=[web_search],
-            system_prompt=system_prompt,
-            checkpointer=cp
-        )
-        if not image or image.strip() == "":
+        if not image or image.strip() == "":# if not image
             message = HumanMessage([{"type":"text","text":prompt}])
-        else:
-            message = HumanMessage([{"type":"image_url","image_url": image}])
+        else: # if exist image
+            message = HumanMessage([{"type":"image","image":image}])
 
         for chunk,metadata in agent.stream(
             {"messages":[message]},
-            config=RunnableConfig(
-                configurable={"thread_id": thread_id},
-                recursion_limit=50,
-            ),
-            stream_mode="messages"
+                config=RunnableConfig(
+                    configurable={"thread_id": thread_id},
+                    recursion_limit=50,  # 可选：放大Agent递归调用上限，避免多轮工具调用时报错
+                    # tags=["chef_agent"],  # 可选：打标签用于日志过滤
+                    # metadata={"scene": "recipe"}  # 可选：附加元数据
+                    ),
+                stream_mode="messages"
         ):
             if isinstance(chunk,AIMessageChunk) and chunk.content:
                 yield chunk.content
     except Exception as err:
-        print(f"流式错误: {err}")
         yield "流式输出错误"
 
 async def get_history(thread_id: str)->list[dict[str,str]]:
-    try:
-        cp = get_healthy_checkpointer()
-        config = {"configurable":{"thread_id":thread_id}}
-        cp_state = cp.get(config)
-        if not cp_state:
-            print("invalid thread_id")
-            return []
-        channel_values = cp_state.get("channel_values", {})
-        messages = channel_values.get("messages", [])
-        result = []
-        for msg in messages:
-            if not msg.content:
-                continue
-            if isinstance(msg, HumanMessage):
-                result.append({"role":"user","content":msg.content})
-            elif isinstance(msg, AIMessage):
-                # 修复原代码拼写错误 assistance → assistant
-                result.append({"role":"assistant","content":msg.content})
-        return result
-    except Exception as e:
-        print(f"获取历史异常: {e}")
+    """
+    Args:
+    :param thread_id:
+    :return:
+    """
+    # according to the thread_id by user provided
+    cp = checkpointer.get({"configurable":{"thread_id":thread_id}})
+    if not cp:
+        print("invalid thread_id")
         return []
+    channel_values = cp.get("channel_values")
+    if not channel_values:
+        return []
+    messages = channel_values.get("messages", [])
+    if not messages:
+        return []
+    result = []
+    for message in messages:
+        if not message.content:
+            continue
+
+        if isinstance(message,HumanMessage):
+            result.append({"role":"user","content":message.content})
+        elif isinstance(message,AIMessage):
+            result.append({"role":"assistance","content":message.content})
+        else:
+            print("没获取到用户和AI的对话消息")
+    return result
 
 async def clear_history(thread_id: str):
-    try:
-        cp = get_healthy_checkpointer()
-        cp.delete_thread({"configurable":{"thread_id": thread_id}})
-    except Exception as e:
-        print(f"清空会话异常: {e}")
+    checkpointer.delete_thread(thread_id)
