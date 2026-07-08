@@ -62,10 +62,13 @@ async def search_recipes(prompt: str, image: str, thread_id: str):
         逐段生成的食谱文本片段
     """
     try:
-        if not image or image.strip() == "":# if not image
-            message = HumanMessage([{"type":"text","text":prompt}])
-        else: # if exist image
-            message = HumanMessage([{"type":"image","image":image}])
+        if not image or image.strip() == "":
+            message = HumanMessage([{"type": "text", "text": prompt}])
+        else:
+            message = HumanMessage([
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image.strip()}}
+            ])
 
         for chunk,metadata in agent.stream(
             {"messages":[message]},
@@ -80,7 +83,9 @@ async def search_recipes(prompt: str, image: str, thread_id: str):
             if isinstance(chunk,AIMessageChunk) and chunk.content:
                 yield chunk.content
     except Exception as err:
-        yield "流式输出错误"
+        error_msg = f"流式输出错误: {str(err)}"
+        print(error_msg)  # Vercel 后台日志可查看
+        yield error_msg
 
 async def get_history(thread_id: str)->list[dict[str,str]]:
     """
