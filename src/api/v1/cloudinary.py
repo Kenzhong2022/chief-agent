@@ -3,7 +3,7 @@ import os
 import cloudinary.utils
 from fastapi import APIRouter
 
-router = APIRouter(prefix="/api/cloudinary", tags=["云存储上传"])
+router = APIRouter(prefix="/cloudinary", tags=["云存储上传"])
 
 # 临时固定用户ID，后续加登录鉴权只需要改这里为Depends获取
 FIXED_USER_ID = 1
