@@ -7,8 +7,23 @@ from psycopg_pool import ConnectionPool
 from langchain.agents import create_agent
 from langchain.messages import HumanMessage,SystemMessage,AIMessage,AIMessageChunk
 from langchain_core.runnables import RunnableConfig
-
+from urllib.parse import urlparse  # 新增：用于校验图片URL
 load_dotenv() # import environment key value
+# ========== 新增1：极简URL校验函数，2行代码解决图片URL非法导致的400报错 ==========
+def _is_valid_image_url(url: str) -> bool:
+    """只校验最核心的两点：有http/https协议、有公网域名，过滤本地/内网地址"""
+    if not url or not url.strip():
+        return False
+    try:
+        parsed = urlparse(url.strip())
+        return (
+            parsed.scheme in ("http", "https")
+            and parsed.netloc
+            and not parsed.netloc.startswith(("127.", "localhost", "192.168.", "10."))
+        )
+    except Exception:
+        return False
+
 from langchain.tools import tool
 # 1.create model
 model = init_chat_model(
@@ -62,13 +77,28 @@ async def search_recipes(prompt: str, image: str, thread_id: str):
         逐段生成的食谱文本片段
     """
     try:
-        if not image or image.strip() == "":
-            message = HumanMessage([{"type": "text", "text": prompt}])
-        else:
-            message = HumanMessage([
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": image.strip()}}
-            ])
+        # ========== 前置校验：非法参数直接返回，不往下游传递 ==========
+        if not prompt or not isinstance(prompt, str) or not prompt.strip():
+            yield "参数错误：提问内容不能为空"
+            return
+
+        if not thread_id or not isinstance(thread_id, str) or not thread_id.strip():
+            yield "参数错误：会话ID不能为空"
+            return
+
+            # 图片URL非法就自动忽略，降级为纯文本对话，不触发模型400报错
+        use_image = _is_valid_image_url(image)
+        if image and not use_image:
+            print(f"无效图片URL已忽略：{image}")
+
+        # 构造消息，格式严格规范
+        content = [{"type": "text", "text": prompt.strip()}]
+        if use_image:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": image.strip()}
+            })
+        message = HumanMessage(content=content)
 
         for chunk,metadata in agent.stream(
             {"messages":[message]},
@@ -112,7 +142,7 @@ async def get_history(thread_id: str)->list[dict[str,str]]:
         if isinstance(message,HumanMessage):
             result.append({"role":"user","content":message.content})
         elif isinstance(message,AIMessage):
-            result.append({"role":"assistance","content":message.content})
+            result.append({"role":"assistant","content":message.content})
         else:
             print("没获取到用户和AI的对话消息")
     return result
