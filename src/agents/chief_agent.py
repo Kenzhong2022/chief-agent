@@ -98,6 +98,7 @@ async def search_recipes(prompt: str, image: str, thread_id: str):
                 "type": "image_url",
                 "image_url": {"url": image.strip()}
             })
+        print('content', content)
         message = HumanMessage(content=content)
 
         for chunk,metadata in agent.stream(

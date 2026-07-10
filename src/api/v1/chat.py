@@ -4,12 +4,16 @@ from src.models.schemas import ChatRequest
 from src.agents.chief_agent import search_recipes,get_history,clear_history
 router = APIRouter()
 
-
 @router.post("/chat/stream")
 async def chat_endpoint(request: ChatRequest):
     return StreamingResponse(
         search_recipes(request.prompt, request.image, request.thread_id),
         media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Content-Type-Options": "nosniff",
+        }
     )
 
 
