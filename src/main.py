@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 # 导入两类路由
 from src.api.v1.chat import router as chat_router
 from src.api.v1.cloudinary_img import router as cloudinary_router

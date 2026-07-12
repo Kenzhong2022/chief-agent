@@ -8,6 +8,8 @@ from langchain.agents import create_agent
 from langchain.messages import HumanMessage,SystemMessage,AIMessage,AIMessageChunk
 from langchain_core.runnables import RunnableConfig
 from urllib.parse import urlparse  # 新增：用于校验图片URL
+from src.cache import stream_cache
+import asyncio
 load_dotenv() # import environment key value
 # ========== 新增1：极简URL校验函数，2行代码解决图片URL非法导致的400报错 ==========
 def _is_valid_image_url(url: str) -> bool:
@@ -100,23 +102,43 @@ async def search_recipes(prompt: str, image: str, thread_id: str):
             })
         print('content', content)
         message = HumanMessage(content=content)
+        # 获取当前最大 ID（从缓存读取）
+        cur_id = stream_cache.get_current_max_id(thread_id)
 
-        for chunk,metadata in agent.stream(
-            {"messages":[message]},
+        for chunk, metadata in agent.stream(
+                {"messages": [message]},
                 config=RunnableConfig(
                     configurable={"thread_id": thread_id},
-                    recursion_limit=50,  # 可选：放大Agent递归调用上限，避免多轮工具调用时报错
-                    # tags=["chef_agent"],  # 可选：打标签用于日志过滤
-                    # metadata={"scene": "recipe"}  # 可选：附加元数据
-                    ),
+                    recursion_limit=50
+                ),
                 stream_mode="messages"
         ):
-            if isinstance(chunk,AIMessageChunk) and chunk.content:
-                yield chunk.content
+            if isinstance(chunk, AIMessageChunk) and chunk.content:
+                cur_id += 1
+                data = chunk.content
+                # 写入缓存（异步加锁）
+                await stream_cache.add_chunk(thread_id, cur_id, data)
+                # 产出 SSE 事件（字典格式）
+                yield {"id": str(cur_id),"event": "message","data": data, "retry": 30000}
+
+
+    except asyncio.CancelledError:
+
+        # 只在 search_recipes 内部捕获 CancelledError（由外部协程取消触发）
+
+        print(f"[search_recipes] 大模型生成被中断，当前已生成 {stream_cache.get_current_max_id(thread_id)} 个 token")
+
+        # 这里可以做更细粒度的日志，然后重新抛出让外层处理
+
+        raise  # 让外层 also 捕获到，保持统一
+
     except Exception as err:
-        error_msg = f"流式输出错误: {str(err)}"
-        print(error_msg)  # Vercel 后台日志可查看
-        yield error_msg
+
+        print(f"[search_recipes] 发生错误: {err}")
+
+        yield {"data": f"生成失败: {err}"}
+
+        return
 
 async def get_history(thread_id: str)->list[dict[str,str]]:
     """
