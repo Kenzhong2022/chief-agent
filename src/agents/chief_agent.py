@@ -111,7 +111,7 @@ async def search_recipes(prompt: str, image: str, thread_id: str):
                 # 写入缓存（异步加锁）
                 await stream_cache.add_chunk(thread_id, cur_id, data)
                 # 产出 SSE 事件（字典格式）
-                yield {"id": str(cur_id),"event": "message","data": data, "retry": 30000}
+                yield {"id": str(cur_id),"event": "message","data": data}
 
     except (asyncio.CancelledError, GeneratorExit):
         print(f"[search_recipes] 大模型生成被中断，当前已生成 {stream_cache.get_current_max_id(thread_id)} 个 token")

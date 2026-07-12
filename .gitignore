@@ -1,36 +1,45 @@
-# 虚拟环境（必须忽略，体积巨大）
-.venv/
+# ========== 1. Python 虚拟环境（体积巨大，必须忽略）
 venv/
-env/
-uv.lock
+.venv/
 
-# Python 编译缓存
+# ========== 2. 本地测试/临时业务目录（本次新增）
+LangChain/
+初始化模型/
+调用大模型/
+
+# ========== 3. Python 编译缓存
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# 密钥环境文件（核心，防止API Key泄露）
+# ========== 4. 密钥环境文件（防止API、数据库密钥泄露，核心）
 .env
 .env.local
 
-# Jupyter 笔记缓存
-.ipynb_checkpoints/
+# ========== 5. Jupyter Notebook 笔记与缓存
 *.ipynb
+.ipynb_checkpoints/
 
-# 日志、临时文件
+# ========== 6. 日志、临时缓存文件
 *.log
 *.tmp
 *.cache
 
-# 系统/IDE文件
+# ========== 7. 系统 / IDE 配置文件
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
 
-# 打包、测试缓存
+# ========== 8. 打包、测试产物缓存
 dist/
 build/
 *.egg-info/
 .pytest_cache/
+
+# ========== 可选：版本锁定文件（团队协作建议保留，不需要可取消注释）
+# uv.lock
+# requirements.txt
+# pyproject.toml
+# vercel.json

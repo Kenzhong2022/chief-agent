@@ -11,7 +11,7 @@ from src.api.v1.chat import router as chat_router
 from src.api.v1.cloudinary_img import router as cloudinary_router
 
 # 导入 chief_agent 模块，以便重新设置 agent
-from src.agents import chief_agent
+from src.agents import chief_agent,suggest_agent
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -29,6 +29,8 @@ async def lifespan(app: FastAPI):
     else:
         print("⚠️ 未配置 CONN_STR，使用无状态模式")
         chief_agent.agent = chief_agent.build_agent(None)
+        # 初始化搜索联想 agent（这里假设无需 checkpointer，传 None）
+        suggest_agent.agent = suggest_agent.build_agent(checkpointer=None)
 
     # 服务运行全程持有连接池，不提前销毁
     yield

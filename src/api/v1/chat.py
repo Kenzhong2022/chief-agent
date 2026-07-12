@@ -1,5 +1,4 @@
 from fastapi import APIRouter
-from fastapi.responses import StreamingResponse  # 流式响应核心类
 from sse_starlette.sse import EventSourceResponse
 from fastapi import Request  # 用于获取请求头
 from src.models.schemas import ChatRequest,StopStreamRequest
