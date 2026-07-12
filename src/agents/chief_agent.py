@@ -1,30 +1,22 @@
+import traceback
 from langchain.chat_models import init_chat_model
 from dotenv import load_dotenv
 import os
 from langchain_tavily import TavilySearch
 from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg_pool import AsyncConnectionPool
 from psycopg_pool import ConnectionPool
 from langchain.agents import create_agent
 from langchain.messages import HumanMessage,SystemMessage,AIMessage,AIMessageChunk
 from langchain_core.runnables import RunnableConfig
-from urllib.parse import urlparse  # 新增：用于校验图片URL
+from urllib.parse import urlparse
 from src.cache import stream_cache
 import asyncio
+from typing import Dict
+from langgraph.pregel import Pregel
+
 load_dotenv() # import environment key value
-# ========== 新增1：极简URL校验函数，2行代码解决图片URL非法导致的400报错 ==========
-def _is_valid_image_url(url: str) -> bool:
-    """只校验最核心的两点：有http/https协议、有公网域名，过滤本地/内网地址"""
-    if not url or not url.strip():
-        return False
-    try:
-        parsed = urlparse(url.strip())
-        return (
-            parsed.scheme in ("http", "https")
-            and parsed.netloc
-            and not parsed.netloc.startswith(("127.", "localhost", "192.168.", "10."))
-        )
-    except Exception:
-        return False
 
 from langchain.tools import tool
 # 1.create model
@@ -51,21 +43,20 @@ system_prompt = """
 
 请严格按照流程，优先调用 web_search 工具搜索食谱，搜索不到的情况下才能自己发挥。
 """
-# 3.2 setup checkpointer
-conn_string = os.getenv("CONN_STR")
-if conn_string:
-    pool = ConnectionPool(conninfo=conn_string)
-    checkpointer = PostgresSaver(pool)
-    checkpointer.setup()  # 自动创建 checkpoint 表，首次运行执行一次即可
-else:
-    print("警告：未配置数据库连接串，会话记忆不会持久化")
-
-agent = create_agent(
-    model=model,
-    tools=[web_search],
-    system_prompt=system_prompt,
-    checkpointer=checkpointer
-)
+# 类型注解替换为 Pregel
+agent: Pregel | None = None
+# 全局 checkpointer 引用（将在 build_agent 中赋值）
+_checkpointer: AsyncPostgresSaver | None = None
+def build_agent(checkpointer):
+    """根据 checkpointer 创建 agent 实例"""
+    global _checkpointer
+    _checkpointer = checkpointer
+    return create_agent(
+        model=model,
+        tools=[web_search],
+        system_prompt=system_prompt,
+        checkpointer=checkpointer,
+    )
 
 async def search_recipes(prompt: str, image: str, thread_id: str):
     """流式输出食谱推荐结果，逐块返回文本片段。
@@ -78,6 +69,10 @@ async def search_recipes(prompt: str, image: str, thread_id: str):
     Yields:
         逐段生成的食谱文本片段
     """
+    current_task = asyncio.current_task()
+    if current_task:
+        await register_task(thread_id, current_task)
+
     try:
         # ========== 前置校验：非法参数直接返回，不往下游传递 ==========
         if not prompt or not isinstance(prompt, str) or not prompt.strip():
@@ -105,12 +100,9 @@ async def search_recipes(prompt: str, image: str, thread_id: str):
         # 获取当前最大 ID（从缓存读取）
         cur_id = stream_cache.get_current_max_id(thread_id)
 
-        for chunk, metadata in agent.stream(
+        async for chunk, metadata in agent.astream(
                 {"messages": [message]},
-                config=RunnableConfig(
-                    configurable={"thread_id": thread_id},
-                    recursion_limit=50
-                ),
+                config=RunnableConfig(configurable={"thread_id": thread_id}, recursion_limit=50),
                 stream_mode="messages"
         ):
             if isinstance(chunk, AIMessageChunk) and chunk.content:
@@ -121,54 +113,147 @@ async def search_recipes(prompt: str, image: str, thread_id: str):
                 # 产出 SSE 事件（字典格式）
                 yield {"id": str(cur_id),"event": "message","data": data, "retry": 30000}
 
-
-    except asyncio.CancelledError:
-
-        # 只在 search_recipes 内部捕获 CancelledError（由外部协程取消触发）
-
+    except (asyncio.CancelledError, GeneratorExit):
         print(f"[search_recipes] 大模型生成被中断，当前已生成 {stream_cache.get_current_max_id(thread_id)} 个 token")
-
-        # 这里可以做更细粒度的日志，然后重新抛出让外层处理
-
-        raise  # 让外层 also 捕获到，保持统一
+        return  # 直接退出，不再向上抛出
 
     except Exception as err:
-
         print(f"[search_recipes] 发生错误: {err}")
-
+        traceback.print_exc()  # 添加这一行，会打印完整的调用堆栈
         yield {"data": f"生成失败: {err}"}
-
         return
+    finally:
+        await unregister_task(thread_id)
 
-async def get_history(thread_id: str)->list[dict[str,str]]:
-    """
-    Args:
-    :param thread_id:
-    :return:
-    """
-    # according to the thread_id by user provided
-    cp = checkpointer.get({"configurable":{"thread_id":thread_id}})
-    if not cp:
+async def get_history(thread_id: str) -> list[dict[str, str]]:
+    config = RunnableConfig(configurable={"thread_id": thread_id})
+    # 获取最新状态快照
+    snapshot = await agent.aget_state(config)
+    if not snapshot or not snapshot.values:
         print("invalid thread_id")
         return []
-    channel_values = cp.get("channel_values")
-    if not channel_values:
-        return []
-    messages = channel_values.get("messages", [])
-    if not messages:
-        return []
+    # 提取当前会话最新 checkpoint_id
+    latest_checkpoint_id = snapshot.config["configurable"]["checkpoint_id"]
+    print("会话最新 checkpoint_id:", latest_checkpoint_id)
+
+    messages = snapshot.values.get("messages", [])
     result = []
     for message in messages:
         if not message.content:
             continue
-
-        if isinstance(message,HumanMessage):
-            result.append({"role":"user","content":message.content})
-        elif isinstance(message,AIMessage):
-            result.append({"role":"assistant","content":message.content})
-        else:
-            print("没获取到用户和AI的对话消息")
+        if isinstance(message, HumanMessage):
+            result.append({"role": "user", "content": message.content})
+        elif isinstance(message, AIMessage):
+            result.append({"role": "assistant", "content": message.content})
     return result
 
-async def clear_history(thread_id: str):
-    checkpointer.delete_thread(thread_id)
+async def clear_history(thread_id: str) -> tuple[bool, str]:
+    checkpointer = _checkpointer
+    if not checkpointer or not agent:
+        return False, "服务未初始化"
+
+    try:
+        # 删除数据库会话
+        await checkpointer.adelete_thread(thread_id)
+        # 清空分片缓存
+        await stream_cache.clear_thread(thread_id)
+        return True, "会话已清空"
+    except Exception as e:
+        traceback.print_exc()
+        return False, f"清理失败: {str(e)}"
+
+async def save_snapshot(thread_id: str, last_event_id: str) -> tuple[bool, str]:
+    """
+    将缓存中的半截内容保存到检查点，并标记为未完成。
+    返回 (是否成功, 消息)
+    """
+    # 1. 先尝试取消任务 即使任务已经结束
+    await cancel_task(thread_id)
+
+    # 2. 从 Redis/内存缓存中获取所有已生成的文本（按顺序拼接）
+    chunks = await stream_cache.get_chunks(thread_id, 1)   # 获取全部（ID>=1）
+    if not chunks:
+        return False, "没有可保存的内容，可能生成尚未开始或缓存已清空"
+    print(chunks)
+    full_text = "".join(data for _, data in chunks)
+
+    # 3. 构造“未完成”的 AI 消息，存储 last_event_id 和完成标记
+    partial_msg = AIMessage(
+        content=full_text,
+        additional_kwargs={
+            "last_event_id": last_event_id,
+            "is_complete": False,
+        }
+    )
+
+    # 4. 更新 LangGraph 检查点
+    config:RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    # 获取当前状态
+    state = await agent.aget_state(config)
+    messages = state.values.get("messages", []) if state and state.values else []
+
+    # 如果最后一条消息是 AI 消息且未完成，则替换；否则追加
+    if messages and isinstance(messages[-1], AIMessage) and not messages[-1].additional_kwargs.get("is_complete", True):
+        messages[-1] = partial_msg
+    else:
+        messages.append(partial_msg)
+
+    # 更新状态
+    await agent.aupdate_state(config, {"messages": messages})
+
+    # 5. 可选：清理缓存（如果决定保存后即清理，可以启用）
+    await stream_cache.clear_thread(thread_id)
+
+    return True, "快照已保存"
+
+# ========== 新增1：极简URL校验函数，2行代码解决图片URL非法导致的400报错 ==========
+def _is_valid_image_url(url: str) -> bool | str:
+    """只校验最核心的两点：有http/https协议、有公网域名，过滤本地/内网地址"""
+    if not url or not url.strip():
+        return False
+    try:
+        parsed = urlparse(url.strip())
+        return (
+            parsed.scheme in ("http", "https")
+            and parsed.netloc
+            and not parsed.netloc.startswith(("127.", "localhost", "192.168.", "10."))
+        )
+    except Exception:
+        return False
+
+active_tasks:Dict[str, asyncio.Task] = {}
+task_lock = asyncio.Lock()
+
+async def register_task(thread_id: str, task: asyncio.Task):
+    """注册任务到全局字典"""
+    async with task_lock:
+        active_tasks[thread_id] = task
+        print(f"[TaskManager] ✅ 注册任务 | thread_id: {thread_id} | task_id: {id(task)}")
+
+async def unregister_task(thread_id: str):
+    """从全局字典中移除任务"""
+    async with task_lock:
+        task = active_tasks.pop(thread_id, None)
+        if task:
+            print(f"[TaskManager] ❌ 注销任务 | thread_id: {thread_id} | task_id: {id(task)} (成功)")
+        else:
+            print(f"[TaskManager] ⚠️ 注销任务 | thread_id: {thread_id} (未找到任务)")
+
+async def cancel_task(thread_id: str) -> bool:
+    """
+    取消指定 thread_id 的任务
+    返回 True 表示成功取消，False 表示任务不存在或已完成
+    """
+    async with task_lock:
+        task = active_tasks.get(thread_id)
+        if task is not None and not task.done():
+            task.cancel()
+            print(f"[TaskManager] 🛑 取消任务 | thread_id: {thread_id} | task_id: {id(task)} (成功)")
+            return True
+        else:
+            if task is None:
+                status = "任务不存在"
+            else:
+                status = f"任务已完成 (done={task.done()})"
+            print(f"[TaskManager] ⚠️ 取消任务 | thread_id: {thread_id} | {status}")
+            return False
