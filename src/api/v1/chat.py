@@ -1,9 +1,11 @@
 from fastapi import APIRouter
-from sse_starlette.sse import EventSourceResponse
 from fastapi import Request  # 用于获取请求头
+
+from sse_starlette.sse import EventSourceResponse # 流式输出响应结构
 from src.models.schemas import ChatRequest,StopStreamRequest
 from src.agents.chief_agent import search_recipes,get_history,clear_history,save_snapshot
 from src.cache import stream_cache
+
 import asyncio
 router = APIRouter()
 
