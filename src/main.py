@@ -39,26 +39,21 @@ async def lifespan(app: FastAPI):
     init_index()  # 从 prefix_index.json 加载索引到内存
 
     # ----- 启动定时更新调度器 -----
-    scheduler = BackgroundScheduler()
+    # scheduler = BackgroundScheduler()
+    #
     # scheduler.add_job(
     #     func=update_index_job,
-    #     trigger="cron",
-    #     day_of_week="mon",  # 每周一
-    #     hour=3,  # 凌晨 3 点
-    #     minute=0
+    #     trigger="interval",
+    #     minutes=1
     # )
-    scheduler.add_job(
-        func=update_index_job,
-        trigger="interval",
-        minutes=1
-    )
-    scheduler.start()
-    print("⏰ 联想词库定时更新已启动（每周一 03:00）")
-    # 服务运行全程持有连接池，不提前销毁
-    yield
+    # scheduler.start()
+    # print("⏰ 联想词库定时更新已启动（每周一 03:00）")
+    # # 服务运行全程持有连接池，不提前销毁
+    # yield
+    #
+    # # 服务关闭时统一释放资源
+    # scheduler.shutdown()
 
-    # 服务关闭时统一释放资源
-    scheduler.shutdown()
     if pool is not None:
         await pool.close()
         print("✅ PostgreSQL 连接池已正常关闭")
